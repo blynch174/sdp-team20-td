@@ -1,4 +1,4 @@
-# UConn SDP Team 19 - Dashboard
+# UConn SDP Team 20 - Dashboard
 
 ## Notes for Brandon Lynch
 
