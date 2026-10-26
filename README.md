@@ -1,91 +1,94 @@
-# UConn SDP Team 20 - Dashboard
+# Turbo Ducks — Live Telemetry Dashboard
 
-## Notes for Brandon Lynch
+**UConn Senior Design Project, Team 20 (2026–2027)**
+Sponsored by **OWL Integrations** · Faculty advisor: **Dr. Shin**
 
-Hello, my name is Vlad Vetroff! Please to meet you, here in this markdown document!
+A live telemetry dashboard for UConn Formula SAE's electric race car. Data comes off the car, gets parsed, and shows up on a dashboard the pit crew can watch in real time.
 
-This is the complete repo for our (Esha and I) side of the Turbo Ducks project, where we get the data from the DMS (or otherwise), parse it and display it on a dashboard.
+This year's team is continuing the system built by the 2025–2026 team (see [Project history](#project-history)).
 
-I am sure you have some questions regarding this project, as you and your team are continuing it. I figured I could answer some questions that you MIGHT have. Will you read it? Beats me.
+---
 
-> How do I start this app up?
+## Team
 
-- `docker compose up -d` at the root of the repo. I do not have the `.env` variables anymore, but thankfully they are fake.
-  - `OWL_API_KEY` is just some random string used within `backend/mock/mock_dms.py` and has no real bearing within the project as a whole.
-  - `OWL_INSTANCE` is just the url the `mock_dms.py` runs on.
-  - `REDIS_HOST` and `REDIS_PORT` are the default host and port of a Redis container. Check the Redis documentation for that.
-  - You WILL need to populate these if you want the app to run!
-- If you want to run the servers separately (would not recommend).
-  - Backend:
+| Name | Major | Role |
+|---|---|---|
+| Brandon Lynch | CSE | Team manager · Edge (car ↔ pit) |
+| Ethan Ucol | CSE | Edge (car ↔ pit) |
+| Abdullah Rashid | CSE | Data Modeling |
+| Maximus Formoso | CSE | Security |
 
-    ```sh
-    cd backend/
-    python3 -m venv .venv
-    source .venv/bin/activate # For macs
-    source venv/Scripts/activate # For windows (ew)
-    pip install --upgrade pip && pip install -r requirements.txt
-    ```
+---
 
-  - Frontend:
+## Goals for 2026–2027
 
-    ```
-    cd frontend/
-    npm install
-    npm run dev
-    ```
+- **Live dashboard for the crew:** an F1-style view of the car's telemetry during a run
+- **Edge pipeline:** a Raspberry Pi (or similar) on the car sending data to a laptop in the pit
+- **Run storage:** save each run automatically so the crew no longer has to pull the SD card
+- **Prediction:** flag problems that are actually predictable before they happen
+- **Security:** UConn SSO login and access controls
 
-    - update packages as needed
+---
 
-> Do you have documentation?
+## Quick start
 
-- Whatever documentation you need, you can find it in the contents of the `doc/papers/` dir, especially the last paper.
+Requires [Docker](https://www.docker.com/products/docker-desktop/).
 
-> What is the tech stack, and why did you choose this particular stack?
+```bash
+cp .env.example .env
+docker compose up -d --build
+```
 
-- The backend was built with FastAPI + Redis, and frontend with React. Pretty standard stuff.
+Then open **http://localhost:3000**. You should see 9 charts updating once per second with fake data.
 
-- Pretty much all of us knew how to program in Python. We didn't want to learn some other language, like Go or Java, to make a backend server, as we had other things going on at the time; being a senior and all. Python, and by extension Flask/FastAPI, was just the most sensible, go-to option at the time.
+| Service | URL | What it is |
+|---|---|---|
+| Dashboard | http://localhost:3000 | React frontend |
+| Backend API | http://localhost:8000/api/health | FastAPI server |
+| Mock car | http://localhost:5000/health | Fake data source |
 
-- We chose to use FastAPI instead of the UConn 'standard' of Flask because of FastAPI's built-in support for WebSockets, which plays a big part in this project, with the whole "real time" display of incoming data and everything. Plus, I have grown to LOVE FastAPI, as I am sure you might/will too!
+Stop everything with `docker compose down`. For full setup steps and troubleshooting, see [`demo.txt`](demo.txt).
 
-- There is nothing to say about our choice of React for frontend, other the fact that the most popular charting library `recharts` uses, or at least is used alongside, React. I **highly** recommend you look through the `recharts` documentation, or choose a different charting library, if you so desire.
+---
 
-- The database is a Redis cache, which is an emphemeral cache. I will explain why we chose this in the next question
+## How it works
 
-> Why does this repo not have a persistent database, like PostgreSQL or similar? Why did you choose to use a Redis cache?
+```
+Mock DMS (fake car) ──► Backend (FastAPI) ──► Redis (last 2 min)
+                              │
+                              └──WebSocket──► Frontend (React + recharts)
+```
 
-- We chose to use a Redis cache for a couple of reasons.
-  1. This was a prototype. We were not expected to built a fully fledged app, ready for production for the Formula SAE team, at the time of development. As such, it does not have all the necessary bells and whistles, like OAuth/SAML login with UConn NetID, deployment config and such.
-  2. After speaking directly to the Electrical Lead of Formula SAE, I have learned that they already store the data that they collect internally, inside the car's CAN network and inside an SD Card. Therefore, there would be no point in us persisting this data on our end, unless they want to keep another copy of the data.
-  3. Formula SAE, at the time of development, did not express the desire to view past data logs in this app. I figured it is because they can already do that, by means of looking at the data from the SD card.
-  4. We saw no reason to have persistent data. This app is analogous to a magnifying glass or a multimeter for the electric race car. With respect to this app, Formula SAE cares about what the data looks like right now and what it looked like two minutes ago. Since Formula SAE wanted to keep a record of what the data looked like within the last two minutes, a Redis cache was perfect for this.
+1. **Data source:** `backend/mock/mock_dms.py` stands in for OWL's DMS and returns random readings for 9 channels (pack voltage, RPM, etc.).
+2. **Backend:** polls the data source every second, stores each reading in Redis, and pushes it to the dashboard over a WebSocket.
+3. **Redis:** keeps a rolling 2-minute window of data. Nothing is saved permanently yet.
+4. **Frontend:** draws one live chart per channel.
 
-> What is the file structure of this repo?
+The backend also contains a serial-port reader (commented out in `backend/app.py`) used with a mock CAN bus on last year's demo day.
 
-- `backend/`: all the backend-related logic lives here
-  - `mock/`: this dir contains a 'mock' DMS. Although we had access to OWL's Ducks and Quackerboards, we did not have access to a DMS. If we did, we didn't bother testing it. All it contains is a server with one endpoint, to generate fake data.
-  - `requests/`: these are Bruno requests, meant to test out the backend/redis functionality
-  - The entrypoint for the backend server is `app.py`. Bulk of the logic lives in `background_tasks.py` and `endpoints.py`
-- `frontend/`: all the frontend-related logic lives here
+---
 
-> Why is there commented-out code about some 'serial' business and 'uncomment this for demo day'?
+## Repo layout
 
-- This project is a part of a joint team effort between the CSE and ECE departments. When it came time to showcase our project for demo day, the ECE department created a 'mock CAN bus' which generated fake data as if it came from the Formula SAE electric vehicle. This fake data would get funneled into and read from a USB-C serial bus. This required seperate code to be developed so that the app could read and parse incoming data from the serial port. This project was intended to perform API calls to an actual DMS to get the data, and thus the commented out code has no real bearing on the project as a whole.
+```
+backend/            FastAPI server
+  app.py            Entry point, WebSocket + REST routes
+  background_tasks.py   Polling loop, Redis writes, broadcasting
+  mock/             Fake data source (mock DMS)
+  requests/         Bruno API test requests
+frontend/           React dashboard (Vite)
+doc/
+  data-sets/        Recorded runs from the car (AiM CSV exports)
+  papers/           2025–2026 reports; 04-paper is the final documentation
+  HANDOFF-2025-2026.md  Notes from last year's team
+docker-compose.yml  Runs all four services
+.env.example        Template for the .env file
+```
 
-> This code looks so good! I love it! Who developed it?
+---
 
-- Esha and I
+## Project history
 
-> This code looks real BAD! I hate it! Who developed it?
+The dashboard was built in 2025–2026 by **Vlad Vetroff** and **Esha** (Team 19), as part of a joint CSE/ECE effort with the Turbo Ducks project. Their handoff notes cover the tech-stack choices, why Redis was used instead of a permanent database, and the serial/demo-day code: **[doc/HANDOFF-2025-2026.md](doc/HANDOFF-2025-2026.md)**.
 
-- Esha and I
-
-> This code looks okay. I feel neutral about it. Who developed it?
-
-- Esha and I
-
-> Are you available for any more questions?
-
-- Of course! Just email me at `vladislav.vetroff@gmail.com` or send a friend request on discord; you'll have to email me for my discord username, however.
-
-I hope you and your team can really improve this side of the project, especially the contents of the `frontend/` dir. I am sure you will, as it is a small project, all things considered.
+Original repo: [vvvetroff/sdp-team19-dashboard](https://github.com/vvvetroff/sdp-team19-dashboard)
