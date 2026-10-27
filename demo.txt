@@ -25,3 +25,12 @@ docker compose restart backend    # restart one service
 docker compose down               # stop everything
 docker compose up -d --build      # rebuild after changing requirements.txt or package.json
 
+
+## What we added
+
+- In backend/mock/mock_dms.py: added ""Tire Temp": round(random.uniform(30, 90), 2)," to Payload dictionary
+
+- In frontend/src/App.py: added "tire_temp" to Metrics list and
+  "tire_temp: { label: "Tire Temp", unit: "°C", color: "#fb923c" }," in METRIC_CONFIG
+
+This adds tire temperature to the dashboard
