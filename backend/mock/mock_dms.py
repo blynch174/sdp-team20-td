@@ -43,6 +43,7 @@ def generate_mock_message() -> dict[str, Any]:
                 "Torque Feedback": round(random.uniform(0, 50), 2),
                 "RPM": round(random.uniform(0, 50), 2),
                 "Flux Feedback": round(random.uniform(0, 50), 2),
+                "Tire Temp": round(random.uniform(30, 90), 2),
             },
             "DeviceID": "DUCK0001",
             "duckType": 1,

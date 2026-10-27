@@ -20,6 +20,7 @@ const METRICS = [
   "torque_feedback",
   "rpm",
   "flux_feedback",
+  "tire_temp",
 ];
 
 const MAX_POINTS = 130;
@@ -53,6 +54,7 @@ const METRIC_CONFIG = {
   torque_feedback: { label: "Torque Feedback", unit: "Nm", color: "#a78bfa" },
   rpm: { label: "RPM", unit: "rpm", color: "#f472b6" },
   flux_feedback: { label: "Flux Feedback", unit: "Wb", color: "#94a3b8" },
+    tire_temp: { label: "Tire Temp", unit: "°C", color: "#fb923c" },
 };
 
 function formatAxisTime(timestampMs) {
