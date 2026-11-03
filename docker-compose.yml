@@ -19,6 +19,10 @@ services:
     container_name: sdp19-mock-dms
     environment:
       - OWL_API_KEY=${OWL_API_KEY}
+      # Data source for the fake car: "sim" (simulated run) or "csv" (replay a log)
+      - DATA_SOURCE=${DATA_SOURCE:-sim}
+      - CSV_PATH=${CSV_PATH:-/data/801.csv}
+      - SIM_SPEED=${SIM_SPEED:-1.0}
     ports:
       - "5000:5000"
     command:
@@ -33,6 +37,7 @@ services:
       ]
     volumes:
       - ./backend/mock:/app
+      - ./doc/data-sets:/data:ro
 
   backend:
     build:
