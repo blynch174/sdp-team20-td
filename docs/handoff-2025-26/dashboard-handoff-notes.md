@@ -1,6 +1,6 @@
 # UConn SDP Team 20 - Dashboard
 
-## Notes for Team 20
+## Notes for Brandon Lynch
 
 Hello, my name is Vlad Vetroff! Please to meet you, here in this markdown document!
 
@@ -38,7 +38,7 @@ I am sure you have some questions regarding this project, as you and your team a
 
 > Do you have documentation?
 
-- Whatever documentation you need, you can find it in the contents of the `doc/papers/` dir, especially the last paper.
+- Whatever documentation you need, you can find it in the contents of the `papers/` folder next to this file, especially the last paper.
 
 > What is the tech stack, and why did you choose this particular stack?
 

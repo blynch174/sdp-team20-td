@@ -1,94 +1,36 @@
-# Turbo Ducks — Live Telemetry Dashboard
+# UConn SDP Team 20: Turbo Ducks (Year 2)
 
-**UConn Senior Design Project, Team 20 (2026–2027)**
-Sponsored by **OWL Integrations** · Faculty advisor: **Dr. Shin**
+Live telemetry and edge analytics for the UConn Formula SAE electric race car, sponsored by OWL Integrations. We're continuing Team 19's 2025–26 project.
 
-A live telemetry dashboard for UConn Formula SAE's electric race car. Data comes off the car, gets parsed, and shows up on a dashboard the pit crew can watch in real time.
+**Read first:** [docs/year-1-vs-year-2.md](docs/year-1-vs-year-2.md). All documents are indexed in [docs/README.md](docs/README.md).
 
-This year's team is continuing the system built by the 2025–2026 team (see [Project history](#project-history)).
-
----
-
-## Team
-
-| Name | Major | Role |
-|---|---|---|
-| Brandon Lynch | CSE | Team manager · Edge (car ↔ pit) |
-| Ethan Ucol | CSE | Edge (car ↔ pit) |
-| Abdullah Rashid | CSE | Data Modeling |
-| Maximus Formoso | CSE | Security |
-
----
-
-## Goals for 2026–2027
-
-- **Live dashboard for the crew:** an F1-style view of the car's telemetry during a run
-- **Edge pipeline:** a Raspberry Pi (or similar) on the car sending data to a laptop in the pit
-- **Run storage:** save each run automatically so the crew no longer has to pull the SD card
-- **Prediction:** flag problems that are actually predictable before they happen
-- **Security:** UConn SSO login and access controls
-
----
-
-## Quick start
-
-Requires [Docker](https://www.docker.com/products/docker-desktop/).
-
-```bash
-cp .env.example .env
-docker compose up -d --build
-```
-
-Then open **http://localhost:3000**. You should see 9 charts updating once per second with fake data.
-
-| Service | URL | What it is |
-|---|---|---|
-| Dashboard | http://localhost:3000 | React frontend |
-| Backend API | http://localhost:8000/api/health | FastAPI server |
-| Mock car | http://localhost:5000/health | Fake data source |
-
-Stop everything with `docker compose down`. For full setup steps and troubleshooting, see [`demo.txt`](demo.txt).
-
----
-
-## How it works
+## Planned data path (phase 1)
 
 ```
-Mock DMS (fake car) ──► Backend (FastAPI) ──► Redis (last 2 min)
-                              │
-                              └──WebSocket──► Frontend (React + recharts)
+CAN bus / sensors ─► Pi Zero 2W ─UART─► T-Beam DuckLink ─LoRa 915 MHz─► PapaDuck gateway ─► pit laptop ─► dashboard
+     (edge/)                              (firmware/ducklink/)              (firmware/papaduck/)    (pit/)     (frontend/)
 ```
 
-1. **Data source:** `backend/mock/mock_dms.py` stands in for OWL's DMS and returns random readings for 9 channels (pack voltage, RPM, etc.).
-2. **Backend:** polls the data source every second, stores each reading in Redis, and pushes it to the dashboard over a WebSocket.
-3. **Redis:** keeps a rolling 2-minute window of data. Nothing is saved permanently yet.
-4. **Frontend:** draws one live chart per channel.
-
-The backend also contains a serial-port reader (commented out in `backend/app.py`) used with a mock CAN bus on last year's demo day.
-
----
+The OWL DMS cloud connection comes later ([decision D4](docs/decisions.md)).
 
 ## Repo layout
 
-```
-backend/            FastAPI server
-  app.py            Entry point, WebSocket + REST routes
-  background_tasks.py   Polling loop, Redis writes, broadcasting
-  mock/             Fake data source (mock DMS)
-  requests/         Bruno API test requests
-frontend/           React dashboard (Vite)
-doc/
-  data-sets/        Recorded runs from the car (AiM CSV exports)
-  papers/           2025–2026 reports; 04-paper is the final documentation
-  HANDOFF-2025-2026.md  Notes from last year's team
-docker-compose.yml  Runs all four services
-.env.example        Template for the .env file
-```
+| Folder | Status | What goes here |
+|---|---|---|
+| [frontend/](frontend/) | **Working** (from Year 1, reworked) | React + Recharts dashboard. Most likely part to be reused |
+| [backend/](backend/) | **Working** (from Year 1) | FastAPI + Redis backend and the mock DMS (`backend/mock/`). Likely replaced or reshaped by `pit/` |
+| [data/](data/) | Has data | Raw logs. `data/raw/2025-07-12/` holds ten AiM CSVs from 2025 |
+| [docs/](docs/) | Has docs | Sponsor docs, Team 19 handoff, our papers, decisions, reference notes |
+| [edge/](edge/) | Placeholder | Raspberry Pi Zero 2W software on the car |
+| [firmware/](firmware/) | Placeholder | T-Beam DuckLink and PapaDuck gateway firmware |
+| [pit/](pit/) | Placeholder | Pit laptop: receive from the gateway, decrypt, decode, feed the dashboard |
+| [protocol/](protocol/) | Placeholder | The packet format shared by `edge/`, `firmware/` and `pit/` |
+| [security/](security/) | Placeholder | Encryption, keys, SSO/NetID, offline access |
+| [ml/](ml/) | Placeholder | Data prep, features, models, experiments (incl. FastF1 exploration) |
+| [hardware/](hardware/) | Placeholder | Wiring, power, mounting, parts list, sensor approvals |
 
----
+Everything here is a work in progress. Existing code is a starting point, not a final design ([decision D5](docs/decisions.md)).
 
-## Project history
+## Run the current dashboard
 
-The dashboard was built in 2025–2026 by **Vlad Vetroff** and **Esha** (Team 19), as part of a joint CSE/ECE effort with the Turbo Ducks project. Their handoff notes cover the tech-stack choices, why Redis was used instead of a permanent database, and the serial/demo-day code: **[doc/HANDOFF-2025-2026.md](doc/HANDOFF-2025-2026.md)**.
-
-Original repo: [vvvetroff/sdp-team19-dashboard](https://github.com/vvvetroff/sdp-team19-dashboard)
+Copy `.env.example` to `.env`, then run `docker compose up -d --build`. Full steps: [docs/guides/run-the-dashboard.md](docs/guides/run-the-dashboard.md).
