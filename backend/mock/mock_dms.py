@@ -14,7 +14,7 @@ DATA SOURCES (pick one with the DATA_SOURCE env var)
         battery gets low, the sim starts a new "run" with a fresh battery.
 
   csv   Replays a recorded log row by row, in real time, looping at the end.
-        Expects the AiM CSV export format (the files in data/raw/2025-07-12/).
+        Expects the AiM CSV export format (the files in doc/data-sets/).
         Set CSV_PATH to the file, e.g. CSV_PATH=/data/801.csv
 
 ADDING REAL OR PUBLIC DATA LATER

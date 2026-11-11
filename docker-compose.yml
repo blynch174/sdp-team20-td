@@ -37,7 +37,7 @@ services:
       ]
     volumes:
       - ./backend/mock:/app
-      - ./data/raw/2025-07-12:/data:ro
+      - ./doc/data-sets:/data:ro
 
   backend:
     build:
