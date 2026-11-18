@@ -1,6 +1,6 @@
 # Data notes: the 2025 FSAE season (27 sessions)
 
-All the CT-16EV telemetry we have from 2025: 27 sessions over 5 days, June 14 to August 1. It comes from Team 19's Hugging Face dataset [`jobegets/ev-fsae-testing`](https://huggingface.co/datasets/jobegets/ev-fsae-testing). The dataset is private; we had access by Nov 18, 2026. Download it to `data/hf/ev-fsae-testing/` (not in git, see [`data/`](../../data/README.md)).
+All the CT-16EV telemetry we have from 2025: 27 sessions over 5 days, June 14 to August 1. It comes from Team 19's Hugging Face dataset [`jobegets/ev-fsae-testing`](https://huggingface.co/datasets/jobegets/ev-fsae-testing). The dataset is private; we had access by Nov 18, 2026. A copy is committed in `data/hf/ev-fsae-testing/` (see [`data/`](../../data/README.md)).
 
 For the July 12 raw exports in `data/raw/2025-07-12/`, see the [July 12 data notes](data-2025-07-12.md).
 
