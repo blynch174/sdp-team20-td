@@ -14,4 +14,5 @@
 
 - **Don't edit raw files.** Cleaned or derived data belongs in `ml/` outputs, not here.
 - **Keep large files out of git.** The 2025 CSVs (about 250 MB) are committed as an exception. For much more data, use Hugging Face or Git LFS, and leave a pointer here.
+- **If you re-download the Hugging Face dataset,** delete the `.gitattributes` it creates in `hf/ev-fsae-testing/` before running `git add`. It routes every CSV into Git LFS, which would replace the files in git with pointers.
 - **This data is FSAE's.** It's in git only because the repo is private. Don't make the repo public, or publish the data, without FSAE's permission.
