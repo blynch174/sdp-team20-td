@@ -16,6 +16,8 @@ Summary of [`jobegets/sdp-team19-anomaly-detection`](https://github.com/jobegets
 
 Inputs used: pack voltage, pack current, SOC, min cell voltage, torque feedback, RPM, flux feedback, and 6 IMU channels. **Pack Temp and BMS LV input are commented out** ("High MSE").
 
+**Evaluation audit:** we re-ran their Isolation Forest evaluation. The headline 99.6% recall / 66.5% FPR rests on a single fault event and a test-tuned threshold, and simple rules beat it. See [team-19-evaluation-audit.md](team-19-evaluation-audit.md).
+
 ## Things to know if you reuse anything
 
 - **There's no API or service.** Results only go to the console and plots.

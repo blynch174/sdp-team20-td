@@ -84,13 +84,15 @@ Hardware caveats:
 |---|---|---|
 | Target | BMS discharge cut-off (`BMS Disch Enable == 0`) as a weak fault label | **Not chosen yet.** Candidates: brake issues, tire temperature or pressure trends. Chosen with FSAE |
 | Approach | Unsupervised: Isolation Forest, IF + rolling mean, autoencoder, LSTM autoencoder | Simple baseline first (e.g. basic forecasting); anomaly detection or supervised only if the data supports it |
-| Data | 27 sessions from one season (Jun–Aug 2025), cleaned copy on Hugging Face. Trained on 1 session, tested on 1 | **Not chosen.** Candidates: the 2025 FSAE logs ([data notes](reference/data-2025-07-12.md)), public data (FastF1), open-source simulators, and sessions logged on the Pi. Everything must be open source ([D7](decisions.md)) |
+| Data | 27 sessions from one season (Jun–Aug 2025), copy on Hugging Face (private; we had access by Nov 18, 2026). Trained on 1 session, tested on 1 | **Not chosen.** Candidates: the 2025 FSAE logs, all 27 sessions ([season notes](reference/data-2025-season.md)), public data (FastF1), open-source simulators, and sessions logged on the Pi. Everything must be open source ([D7](decisions.md)) |
 | Train/test split | One fault-free session vs one session with faults | **Grouped cross-validation by session** (e.g. leave-one-session-out), so nearby rows from one run can't leak into the test fold |
 | Metrics | Recall, false positive rate, lead time (15 s lookback), latency | Precision/recall/FPR once labels are reliable; forecast error; warning time; **inference time and memory on the Pi Zero 2W** |
 | Best result | IF + rolling mean: 99.6% recall, **66.5% FPR**, about 16 ms | n/a yet |
 | This week | n/a | Explore FastF1 (OWL objective) |
 
-What re-checking Year 1's work showed (details in [team-19-ml-repo.md](handoff-2025-26/team-19-ml-repo.md) and [the data notes](reference/data-2025-07-12.md)):
+What re-checking Year 1's work showed (details in [team-19-ml-repo.md](handoff-2025-26/team-19-ml-repo.md), [the evaluation audit](handoff-2025-26/team-19-evaluation-audit.md) and [the data notes](reference/data-2025-07-12.md)):
+
+- **The best result rests on one fault event.** The test session has a single fault event, the threshold was tuned on that same session, and `Pack Temp ≥ 54 °C` alone scores 100% recall at 10.9% FPR on it. Scored on the other sessions, the same model ranges from 0% recall to 94% FPR.
 
 - **The "14.5 s lead time" isn't real early warning.** Every model scored about 15 s, which is the whole lookback window, including the autoencoder that caught 1.6% of faults. With 24–77% of normal rows flagged, some flag almost always lands in the 15 s before a fault.
 - **The report describes the fault label backwards.** It says `BMS Disch Enable = 1` is a fault, but the code (correctly) uses `== 0`.

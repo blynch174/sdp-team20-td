@@ -29,6 +29,7 @@ Keep large datasets and trained model files out of git (see [`data/`](../data/RE
 
 ## Starting points
 
-- [Data notes](../docs/reference/data-2025-07-12.md): what's in `data/raw/2025-07-12/` and its pitfalls.
+- [Season data notes](../docs/reference/data-2025-season.md): all 27 sessions from 2025, their pitfalls, and which targets they can support.
+- [July 12 data notes](../docs/reference/data-2025-07-12.md): what's in `data/raw/2025-07-12/` and its pitfalls.
 - [Team 19's ML repo](../docs/handoff-2025-26/team-19-ml-repo.md): what they built and what to avoid repeating.
 - [exploration/fastf1/](exploration/fastf1/README.md): this week's OWL objective.

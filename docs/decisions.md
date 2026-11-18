@@ -53,3 +53,11 @@ Status values: **Adopted** (we're doing this), **Tentative** (working assumption
   - Shipped models must be trained on data we're allowed to use (FSAE's logs with their permission, or our own Pi logs).
   - **Redis:** `docker-compose.yml` uses `redis:7-alpine`, which resolves to 7.4+ (RSALv2/SSPLv1, not OSI open source). Options: Valkey (BSD-3, drop-in), Redis 8+ under AGPLv3, or pinning Redis 7.2 (BSD-3, older).
   - **Ask the instructor** whether sponsor-provided services (OWL's DMS cloud) and openly *available* but not openly *licensed* data (F1 timing data via FastF1) are allowed. Raw data moved from `doc/data-sets/` to `data/raw/2025-07-12/` (`docker-compose.yml` updated to match). Placeholder folders were created for planned components.
+
+### D8. Closed-source tools are allowed for visualizations
+- **Date:** Nov 11, 2026 · **Status:** Adopted (clarifies D7)
+- **Context:** The team confirmed that UConn's open-source rule (D7) has an exception for visualization.
+- **Decision:** Closed-source tools may be used to visualize data, for example a racing game's replay or a commercial charting or plotting tool.
+- **Consequences:**
+  - The exception covers *showing* data, not *processing* it. Closed tools still can't produce data or models that ship, or run any part of the data path (CAN → Pi → radio → pit → backend).
+  - The Redis issue in D7 is unaffected, because Redis is part of the backend data path, not the visualization.
