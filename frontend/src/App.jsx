@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   LineChart,
   Line,
@@ -73,6 +73,10 @@ const CHANNELS = {
   lateralacc: { label: "Lateral g", unit: "g", decimals: 2, valid: [-3, 3] },
   inlineacc: { label: "Longitudinal g", unit: "g", decimals: 2, valid: [-3, 3] },
   yawrate: { label: "Yaw Rate", unit: "°/s", color: "#a78bfa", decimals: 1, valid: [-300, 300] },
+
+  // Position (track map)
+  gps_latitude: { label: "Latitude", unit: "°", decimals: 6, valid: [-90, 90] },
+  gps_longitude: { label: "Longitude", unit: "°", decimals: 6, valid: [-180, 180] },
 
   // Status flags (0/1)
   inverterenable: { label: "Inverter", flag: "onOff" },
@@ -207,10 +211,16 @@ function clean(key, raw) {
   return v;
 }
 
+/** toFixed without a "-0" (tiny negative sensor noise around zero). */
+function num(v, d) {
+  const out = v.toFixed(d);
+  return /^-0(\.0+)?$/.test(out) ? out.slice(1) : out;
+}
+
 function fmt(key, v) {
   const cfg = CHANNELS[key];
   if (v === null || v === undefined || !Number.isFinite(v)) return "—";
-  return `${v.toFixed(cfg.decimals ?? 2)} ${cfg.unit ?? ""}`.trim();
+  return `${num(v, cfg.decimals ?? 2)} ${cfg.unit ?? ""}`.trim();
 }
 
 const latestOf = (series) => (series?.length ? series[series.length - 1].value : null);
@@ -395,7 +405,7 @@ function StatWidget({ channel, bar, data }) {
     <Card level={level} id={`card-${channel}`}>
       <CardHeader title={cfg.label} level={level} />
       <div style={{ fontSize: "40px", fontWeight: 800, fontFamily: "monospace", color, lineHeight: 1.1 }}>
-        {v === null ? "—" : v.toFixed(cfg.decimals ?? 1)}
+        {v === null ? "—" : num(v, cfg.decimals ?? 1)}
         <span style={{ fontSize: "16px", color: "#64748b", marginLeft: "6px" }}>{cfg.unit}</span>
       </div>
       {bar ? (
@@ -481,7 +491,7 @@ function GaugeWidget({ channel, max, ticks, tickScale = 1, tickSuffix = "", data
         })}
         <line x1={px0} y1={py0} x2={px1} y2={py1} stroke="#f8fafc" strokeWidth="3.5" strokeLinecap="round" />
         <text x={cx} y={cy + 6} fill={color} fontSize="34" fontWeight="800" textAnchor="middle" fontFamily="monospace">
-          {v === null ? "—" : v.toFixed(cfg.decimals ?? 0)}
+          {v === null ? "—" : num(v, cfg.decimals ?? 0)}
         </text>
         <text x={cx} y={cy + 26} fill="#64748b" fontSize="11" textAnchor="middle">
           {cfg.unit}
@@ -630,7 +640,7 @@ function MiniStat({ channel, data, windowEndMs, onOpen }) {
         <Badge level={level} />
       </div>
       <div style={{ fontSize: "28px", fontWeight: 800, fontFamily: "monospace", color, lineHeight: 1.2, marginTop: 4 }}>
-        {v === null ? "—" : v.toFixed(cfg.decimals ?? 1)}
+        {v === null ? "—" : num(v, cfg.decimals ?? 1)}
         <span style={{ fontSize: "13px", color: "#64748b", marginLeft: 5 }}>{cfg.unit}</span>
       </div>
       <ResponsiveContainer width="100%" height={40}>
@@ -641,6 +651,149 @@ function MiniStat({ channel, data, windowEndMs, onOpen }) {
         </LineChart>
       </ResponsiveContainer>
     </Card>
+  );
+}
+
+/* --- Track map ---------------------------------------------------------- */
+const TRACK_MAX_POINTS = 3000; // ~50 min of 1-per-second GPS
+const TRACK_GAP_M = 120;       // a jump bigger than this (log loop, GPS glitch) breaks the line
+
+function overallLevel(data) {
+  const levels = CHANNEL_KEYS.map((k) => severityOf(k, latestOf(data[k])));
+  const ranked = levels.filter((lv) => LEVELS[lv].rank >= 1);
+  return ranked.length ? worst(ranked) : "nodata";
+}
+
+/** Turns lat/lon into flat x/y meters, fitted into the SVG box. */
+function useProjection(points, W, H, pad) {
+  return useMemo(() => {
+    if (!points.length) return null;
+    const lat0 = points.reduce((a, p) => a + p.lat, 0) / points.length;
+    const kx = Math.cos((lat0 * Math.PI) / 180) * 111320;
+    const ky = 110540;
+    const xs = points.map((p) => p.lon * kx);
+    const ys = points.map((p) => p.lat * ky);
+    const minX = Math.min(...xs), maxX = Math.max(...xs);
+    const minY = Math.min(...ys), maxY = Math.max(...ys);
+    const spanX = Math.max(maxX - minX, 30), spanY = Math.max(maxY - minY, 30);
+    const scale = Math.min((W - 2 * pad) / spanX, (H - 2 * pad) / spanY);
+    const offX = (W - spanX * scale) / 2, offY = (H - spanY * scale) / 2;
+    const toXY = (p) => [offX + (p.lon * kx - minX) * scale, H - (offY + (p.lat * ky - minY) * scale)];
+    const metersBetween = (a, b) => Math.hypot((a.lon - b.lon) * kx, (a.lat - b.lat) * ky);
+    return { toXY, metersBetween, scale };
+  }, [points, W, H, pad]);
+}
+
+/** Smooth line through points (quadratic curves through midpoints). GPS arrives ~1/s, so straight lines look jagged. */
+function smoothPath(pts) {
+  if (pts.length < 2) return "";
+  const f = (n) => n.toFixed(1);
+  if (pts.length === 2) return `M${f(pts[0][0])},${f(pts[0][1])} L${f(pts[1][0])},${f(pts[1][1])}`;
+  let d = `M${f(pts[0][0])},${f(pts[0][1])}`;
+  for (let i = 1; i < pts.length - 1; i++) {
+    const mx = (pts[i][0] + pts[i + 1][0]) / 2, my = (pts[i][1] + pts[i + 1][1]) / 2;
+    d += ` Q${f(pts[i][0])},${f(pts[i][1])} ${f(mx)},${f(my)}`;
+  }
+  const last = pts[pts.length - 1];
+  return d + ` L${f(last[0])},${f(last[1])}`;
+}
+
+function TrackMap({ track, cursorMs, data }) {
+  const W = 640, H = 440, PAD = 28;
+  // Size the map from real driving, not isolated GPS jumps (e.g. while the GPS is still getting a fix).
+  const framing = useMemo(() => {
+    if (track.length < 3) return track;
+    const kx = Math.cos(((track[0].lat || 0) * Math.PI) / 180) * 111320;
+    const far = (a, b) => Math.hypot((a.lon - b.lon) * kx, (a.lat - b.lat) * 110540) > TRACK_GAP_M;
+    const kept = track.filter((p, i) => {
+      const nearPrev = i > 0 && !far(track[i - 1], p);
+      const nearNext = i < track.length - 1 && !far(p, track[i + 1]);
+      return nearPrev || nearNext;
+    });
+    if (!kept.length) return track;
+    const last = track[track.length - 1];
+    return kept[kept.length - 1] === last ? kept : [...kept, last]; // always keep the car in view
+  }, [track]);
+  const proj = useProjection(framing, W, H, PAD);
+  const level = overallLevel(data);
+  const carColor = level === "nodata" ? LEVELS.info.color : LEVELS[level].color;
+
+  let outline = "", trail = "", car = null, heading = 0;
+  if (proj && track.length) {
+    const segs = [];
+    let cur = [];
+    track.forEach((p, i) => {
+      if (i && proj.metersBetween(track[i - 1], p) > TRACK_GAP_M) {
+        segs.push(cur);
+        cur = [];
+      }
+      cur.push(proj.toXY(p));
+    });
+    segs.push(cur);
+    outline = segs.filter((s) => s.length > 1).map(smoothPath).join(" ");
+    const upTo = cursorMs == null ? track : track.slice(0, lowerBound(track, cursorMs + 1, "t"));
+    let tail = upTo.slice(-8);
+    for (let i = tail.length - 1; i > 0; i--) {
+      if (proj.metersBetween(tail[i - 1], tail[i]) > TRACK_GAP_M) {
+        tail = tail.slice(i); // don't draw the trail across a jump
+        break;
+      }
+    }
+    const recent = tail.map(proj.toXY);
+    trail = smoothPath(recent);
+    car = recent[recent.length - 1];
+    if (recent.length > 1) {
+      const [x0, y0] = recent[recent.length - 2];
+      heading = (Math.atan2(car[1] - y0, car[0] - x0) * 180) / Math.PI;
+    }
+  }
+
+  const speed = latestOf(data.gps_speed);
+  const latG = latestOf(data.lateralacc);
+
+  return (
+    <Card level={level === "nodata" ? "info" : level}>
+      <CardHeader title="Track" level={level === "nodata" ? "info" : level} />
+      <div style={{ position: "relative" }}>
+        <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: "min(500px, max(260px, calc(100vh - 330px)))", display: "block" }} role="img"
+          aria-label="Track map with the car's live position">
+          <rect x="0" y="0" width={W} height={H} rx="8" fill="#020817" />
+          {outline ? (
+            <>
+              <path d={outline} fill="none" stroke="#1e293b" strokeWidth="18" strokeLinejoin="round" strokeLinecap="round" />
+              <path d={outline} fill="none" stroke="#334155" strokeWidth="1.5" strokeDasharray="6 8" />
+            </>
+          ) : null}
+          {trail ? <path d={trail} fill="none" stroke="#38bdf8" strokeOpacity="0.8" strokeWidth="4" strokeLinejoin="round" strokeLinecap="round" /> : null}
+          {car ? (
+            <g style={{ transform: `translate(${car[0]}px, ${car[1]}px)`, transition: "transform 1s linear" }}>
+              <circle r="16" fill={carColor} opacity="0.18" className={level === "critical" ? "pulse-dot" : undefined} />
+              <g transform={`rotate(${heading})`}>
+                <path d="M 11 0 L -7 -7 L -3 0 L -7 7 Z" fill={carColor} stroke="#020817" strokeWidth="1.5" />
+              </g>
+            </g>
+          ) : (
+            <text x={W / 2} y={H / 2} fill="#64748b" fontSize="14" textAnchor="middle">Waiting for GPS…</text>
+          )}
+        </svg>
+        <div style={{ position: "absolute", top: 10, left: 12, display: "flex", gap: 14, fontFamily: "monospace", fontSize: 13 }}>
+          <span style={{ color: "#38bdf8", fontWeight: 700 }}>{speed === null ? "—" : `${speed.toFixed(0)} km/h`}</span>
+          <span style={{ color: "#94a3b8" }}>{latG === null ? "" : `${Math.abs(latG).toFixed(2)} g lateral`}</span>
+        </div>
+      </div>
+    </Card>
+  );
+}
+
+function TrackView({ track, cursorMs, data, windowEndMs }) {
+  return (
+    <div className="track-grid">
+      <TrackMap track={track} cursorMs={cursorMs} data={data} />
+      <div style={{ display: "flex", flexDirection: "column", gap: "14px", minWidth: 0 }}>
+        <GaugeWidget channel="gps_speed" max={120} ticks={[0, 30, 60, 90, 120]} data={data} windowEndMs={windowEndMs} />
+        <GaugeWidget channel="rpm" max={6000} ticks={[0, 1500, 3000, 4500, 6000]} tickSuffix="k" tickScale={0.001} data={data} windowEndMs={windowEndMs} />
+      </div>
+    </div>
   );
 }
 
@@ -665,6 +818,7 @@ function Overview({ data, windowEndMs, onOpen }) {
 function Tabs({ tab, setTab, data }) {
   const tabs = [
     { id: "overview", title: "Overview", keys: OVERVIEW_KEYS },
+    { id: "track", title: "Track", keys: CHANNEL_KEYS },
     ...PANELS.map((p) => ({ id: p.id, title: p.title, keys: panelKeys(p) })),
   ];
   return (
@@ -774,24 +928,209 @@ function Legend() {
 /* ==========================================================================
    APP: loads the last 2 minutes from Redis, then streams live over WebSocket.
    ========================================================================== */
-const emptyBuffers = () => Object.fromEntries(CHANNEL_KEYS.map((k) => [k, []]));
+/* ==========================================================================
+   RECORDING + RUNS
+   Everything that streams in is recorded in memory for the whole session, so
+   you can scroll back to any moment. A run is a named slice of that recording
+   (Start run / Stop run). Recording happens whether or not a run is started,
+   so nothing is lost if nobody presses Start.
 
-function appendPoint(series, timestampMs, value) {
-  const minTs = Date.now() - WINDOW_MS;
-  return [...series, { timestampMs, value }].filter((p) => p.timestampMs >= minTs).slice(-MAX_POINTS);
+   Phase 2: the pit laptop saves runs to a database and the run list loads
+   from there. The views below stay the same.
+   ========================================================================== */
+const MOCK_URL = import.meta.env.VITE_MOCK_URL || "http://localhost:5000";
+const HISTORY_MAX_POINTS = 4 * 60 * 60; // per channel: ~4 hours at 1 update per second
+
+const emptyHistory = () => Object.fromEntries(CHANNEL_KEYS.map((k) => [k, []]));
+
+/** Index of the first point at or after time t (arrays are sorted by time). */
+function lowerBound(arr, t, key = "timestampMs") {
+  let lo = 0, hi = arr.length;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (arr[mid][key] < t) lo = mid + 1;
+    else hi = mid;
+  }
+  return lo;
 }
 
+/** Every channel's points between startMs and endMs. */
+function sliceHistory(history, startMs, endMs) {
+  const out = {};
+  for (const k of CHANNEL_KEYS) {
+    const a = history[k];
+    out[k] = a.slice(lowerBound(a, startMs), lowerBound(a, endMs + 1));
+  }
+  return out;
+}
+
+function pushPoint(arr, p, key = "timestampMs") {
+  if (arr.length && arr[arr.length - 1][key] >= p[key]) return; // duplicate or out of order
+  arr.push(p);
+  if (arr.length > HISTORY_MAX_POINTS) arr.splice(0, arr.length - HISTORY_MAX_POINTS);
+}
+
+/** 754000 -> "12:34", 3754000 -> "1:02:34" */
+function fmtDuration(ms) {
+  const t = Math.max(0, Math.round(ms / 1000));
+  const h = Math.floor(t / 3600), m = Math.floor((t % 3600) / 60), sec = t % 60;
+  const mm = h ? String(m).padStart(2, "0") : String(m);
+  return `${h ? h + ":" : ""}${mm}:${String(sec).padStart(2, "0")}`;
+}
+
+const clockTime = (ms) => new Date(ms).toLocaleTimeString([], { hour: "numeric", minute: "2-digit", second: "2-digit" });
+
+const controlStyle = {
+  backgroundColor: "#1e293b", color: "#e2e8f0", fontFamily: "inherit", fontSize: "12px",
+  padding: "6px 10px", borderRadius: "6px",
+  borderTop: "1px solid #334155", borderRight: "1px solid #334155",
+  borderBottom: "1px solid #334155", borderLeft: "1px solid #334155",
+};
+
+/* --- Run bar: Start/Stop, run picker, timeline, Back to live ------------- */
+function RunBar({ runs, activeRun, view, setView, isLive, scopeStart, scopeEnd, windowEnd, onSeek, onBackToLive, onStart, onStop, now }) {
+  const viewedRun = view === "live" ? null : runs.find((r) => r.id === view);
+  const span = Math.max(1000, scopeEnd - scopeStart);
+  const pos = Math.min(scopeEnd, Math.max(scopeStart, windowEnd));
+
+  let label;
+  if (viewedRun) label = `REPLAY · ${viewedRun.name} · ${fmtDuration(pos - scopeStart)} / ${fmtDuration(span)}`;
+  else if (!isLive) label = `PAUSED at ${clockTime(pos)} · still recording`;
+  else label = activeRun ? `● REC ${activeRun.name} · ${fmtDuration(now - activeRun.startMs)}` : "LIVE · recording";
+  const labelColor = viewedRun || !isLive ? "#38bdf8" : activeRun ? "#ef4444" : "#22c55e";
+
+  return (
+    <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: "10px", marginBottom: "10px" }}>
+      <select aria-label="Choose what to view" value={view} onChange={(e) => setView(e.target.value)} style={controlStyle}>
+        <option value="live">{activeRun ? `Live · ${activeRun.name} (recording)` : "Live"}</option>
+        {runs.filter((r) => r.endMs != null).length ? (
+          <optgroup label="Today's runs">
+            {runs
+              .filter((r) => r.endMs != null)
+              .slice()
+              .reverse()
+              .map((r) => (
+                <option key={r.id} value={r.id}>
+                  {r.name} · {clockTime(r.startMs)} · {fmtDuration(r.endMs - r.startMs)}
+                </option>
+              ))}
+          </optgroup>
+        ) : null}
+      </select>
+
+      {activeRun ? (
+        <button onClick={onStop} style={{ ...controlStyle, color: "#fecaca", backgroundColor: "#450a0a", borderTop: "1px solid #ef4444", borderRight: "1px solid #ef4444", borderBottom: "1px solid #ef4444", borderLeft: "1px solid #ef4444", cursor: "pointer" }}>
+          ■ Stop run
+        </button>
+      ) : (
+        <button onClick={onStart} style={{ ...controlStyle, color: "#bbf7d0", backgroundColor: "#052e16", borderTop: "1px solid #22c55e", borderRight: "1px solid #22c55e", borderBottom: "1px solid #22c55e", borderLeft: "1px solid #22c55e", cursor: "pointer" }}>
+          ● Start run
+        </button>
+      )}
+
+      <span style={{ fontSize: "12px", fontWeight: 700, color: labelColor, whiteSpace: "nowrap" }}>{label}</span>
+
+      <div style={{ flex: "1 1 260px", display: "flex", alignItems: "center", gap: "8px", minWidth: 0 }}>
+        <span style={{ fontSize: "10px", color: "#64748b", whiteSpace: "nowrap" }}>{viewedRun ? "0:00" : clockTime(scopeStart)}</span>
+        <div style={{ position: "relative", flex: 1, minWidth: 120 }}>
+          {/* Run segments shaded on the live timeline */}
+          {!viewedRun
+            ? runs.map((r) => {
+                const a = Math.max(scopeStart, r.startMs), b = Math.min(scopeEnd, r.endMs ?? now);
+                if (b <= a) return null;
+                return (
+                  <div key={r.id} title={r.name} style={{
+                    position: "absolute", top: 6, height: 6, borderRadius: 3, pointerEvents: "none",
+                    left: `${((a - scopeStart) / span) * 100}%`, width: `${((b - a) / span) * 100}%`,
+                    backgroundColor: r.endMs == null ? "#ef444466" : "#38bdf855",
+                  }} />
+                );
+              })
+            : null}
+          <input
+            type="range"
+            aria-label="Timeline: drag to go back in time"
+            min={scopeStart}
+            max={scopeStart + span}
+            step={1000}
+            value={pos}
+            onChange={(e) => onSeek(Number(e.target.value))}
+            style={{ width: "100%", accentColor: viewedRun || !isLive ? "#38bdf8" : "#22c55e", position: "relative" }}
+          />
+        </div>
+        <span style={{ fontSize: "10px", color: "#64748b", whiteSpace: "nowrap" }}>{viewedRun ? fmtDuration(span) : "now"}</span>
+      </div>
+
+      {!isLive ? (
+        <button onClick={onBackToLive} style={{ ...controlStyle, color: "#020817", backgroundColor: "#22c55e", fontWeight: 700, cursor: "pointer" }}>
+          Back to live ●
+        </button>
+      ) : null}
+    </div>
+  );
+}
+
+/* --- Demo feed picker (only appears when the mock car is reachable) ------- */
+function DemoFeed({ feeds, status, onFeed, onSpeed }) {
+  if (!feeds.length) return null;
+  const pos = status?.position_s ?? 0;
+  const detail = status
+    ? status.kind === "sim"
+      ? `Sim run ${status.run} · lap ${status.lap}`
+      : `${fmtDuration(pos * 1000)} / ${fmtDuration((status.duration_s ?? 0) * 1000)}`
+    : "";
+  return (
+    <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap", fontSize: "12px" }}
+      title="Demo only: chooses what the fake car sends. The real car can't be switched.">
+      <span style={{ color: "#64748b", letterSpacing: "0.1em", fontSize: "10px" }}>DEMO FEED</span>
+      <select aria-label="Demo feed" value={status?.id ?? "sim"} onChange={(e) => onFeed(e.target.value)} style={controlStyle}>
+        {feeds.map((f) => (
+          <option key={f.id} value={f.id}>
+            {f.kind === "sim" ? f.label : `${f.label} · ${fmtDuration(f.duration_s * 1000)}${f.moving === false ? " (car parked)" : ""}`}
+          </option>
+        ))}
+      </select>
+      <select aria-label="Playback speed" value={String(status?.speed ?? 1)} onChange={(e) => onSpeed(Number(e.target.value))} style={controlStyle}>
+        {[1, 2, 5, 10].map((x) => (
+          <option key={x} value={String(x)}>{x}×</option>
+        ))}
+      </select>
+      <span style={{ color: "#94a3b8", fontFamily: "monospace" }}>{detail}</span>
+    </div>
+  );
+}
+
+/* ==========================================================================
+   APP
+   ========================================================================== */
 export default function App() {
   const API_BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
   const WS_URL = import.meta.env.VITE_WS_URL || "ws://localhost:8000/ws";
 
-  const [buffers, setBuffers] = useState(emptyBuffers);
+  // Recording lives in refs (it can get large); `version` re-renders when it grows.
+  const historyRef = useRef(emptyHistory());
+  const trackRef = useRef([]); // [{ t, lat, lon }]
+  const [version, setVersion] = useState(0);
+  const bump = () => setVersion((v) => v + 1);
+
   const [lastUpdated, setLastUpdated] = useState(null);
   const [activeDuck, setActiveDuck] = useState("");
   const [ducks, setDucks] = useState([]);
   const [connected, setConnected] = useState(false);
-  const [windowEndMs, setWindowEndMs] = useState(Date.now());
-  const validTabs = ["overview", ...PANELS.map((p) => p.id)];
+  const [now, setNow] = useState(Date.now());
+
+  // Runs and what's being viewed
+  const [runs, setRuns] = useState([]); // [{ id, name, startMs, endMs|null }]
+  const runCounter = useRef(0);
+  const [view, setViewState] = useState("live"); // "live" or a run id
+  const [cursorMs, setCursorMs] = useState(null); // null = follow live / show end of run
+  const [liveSince, setLiveSince] = useState(0); // Live view starts here (reset when the feed changes)
+
+  // Demo feed (mock car controls)
+  const [feeds, setFeeds] = useState([]);
+  const [feedStatus, setFeedStatus] = useState(null);
+
+  const validTabs = ["overview", "track", ...PANELS.map((p) => p.id)];
   const [tab, setTabState] = useState(() => {
     const h = typeof window !== "undefined" ? window.location.hash.slice(1) : "";
     return validTabs.includes(h) ? h : "overview";
@@ -821,10 +1160,31 @@ export default function App() {
   };
 
   useEffect(() => {
-    const timer = setInterval(() => setWindowEndMs(Date.now()), 1000);
+    const timer = setInterval(() => setNow(Date.now()), 1000);
     return () => clearInterval(timer);
   }, []);
 
+  /* --- Demo feed: load list, poll status --- */
+  const mockCall = async (path, method = "GET") => {
+    const res = await fetch(`${MOCK_URL}${path}`, { method });
+    if (!res.ok) throw new Error(`${path}: ${res.status}`);
+    return res.json();
+  };
+  useEffect(() => {
+    let alive = true;
+    mockCall("/control/feeds")
+      .then((j) => alive && setFeeds(j.feeds || []))
+      .catch(() => alive && setFeeds([])); // no mock (real hardware): hide the demo controls
+    const poll = setInterval(() => {
+      mockCall("/control/status").then((j) => alive && setFeedStatus(j)).catch(() => {});
+    }, 2000);
+    return () => {
+      alive = false;
+      clearInterval(poll);
+    };
+  }, []);
+
+  /* --- Ducks --- */
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -844,18 +1204,23 @@ export default function App() {
     };
   }, []);
 
+  /* --- Load the last 2 minutes from Redis, then record everything live --- */
   useEffect(() => {
     let cancelled = false;
     let socket = null;
 
     async function hydrateAndConnect() {
-      setBuffers(emptyBuffers());
+      historyRef.current = emptyHistory();
+      trackRef.current = [];
+      setRuns([]);
+      setViewState("live");
+      setCursorMs(null);
+      bump();
       setLastUpdated(null);
       setConnected(false);
       if (!activeDuck) return;
 
-      // 1) Backfill the last 2 minutes from Redis.
-      const next = emptyBuffers();
+      const next = emptyHistory();
       await Promise.all(
         CHANNEL_KEYS.map(async (k) => {
           try {
@@ -872,44 +1237,51 @@ export default function App() {
                 }
               })
               .filter((p) => p && Number.isFinite(p.timestampMs) && p.value !== null)
-              .filter((p) => p.timestampMs >= Date.now() - WINDOW_MS)
-              .sort((a, b) => a.timestampMs - b.timestampMs)
-              .slice(-MAX_POINTS);
+              .sort((a, b) => a.timestampMs - b.timestampMs);
           } catch (e) {
             console.error(`Hydration failed for ${k}:`, e);
           }
         })
       );
       if (cancelled) return;
-      setBuffers(next);
+      historyRef.current = next;
+      const lonByTime = new Map(next.gps_longitude.map((p) => [p.timestampMs, p.value]));
+      trackRef.current = next.gps_latitude
+        .filter((p) => lonByTime.has(p.timestampMs))
+        .map((p) => ({ t: p.timestampMs, lat: p.value, lon: lonByTime.get(p.timestampMs) }))
+        .filter((p) => Math.abs(p.lat) > 1e-6 || Math.abs(p.lon) > 1e-6);
+      bump();
       setLastUpdated(new Date().toLocaleTimeString());
 
-      // 2) Stream live updates.
       socket = new WebSocket(WS_URL);
       socket.onopen = () => !cancelled && setConnected(true);
       socket.onmessage = (event) => {
         if (cancelled) return;
         const message = JSON.parse(event.data);
         if (message.type !== "data" || !Array.isArray(message.records)) return;
-
-        setBuffers((prev) => {
-          const out = { ...prev };
-          let touched = false;
-          for (const record of message.records) {
-            if (record?.device_id !== activeDuck) continue;
-            const ts = new Date(record.timestamp).getTime();
-            if (!Number.isFinite(ts)) continue;
-            for (const k of CHANNEL_KEYS) {
-              if (record[k] === undefined) continue;
-              const v = clean(k, record[k]);
-              if (v === null) continue; // sensor glitch: skip it
-              out[k] = appendPoint(out[k] || [], ts, v);
-              touched = true;
-            }
+        const hist = historyRef.current;
+        let touched = false;
+        for (const record of message.records) {
+          if (record?.device_id !== activeDuck) continue;
+          const ts = new Date(record.timestamp).getTime();
+          if (!Number.isFinite(ts)) continue;
+          for (const k of CHANNEL_KEYS) {
+            if (record[k] === undefined) continue;
+            const v = clean(k, record[k]);
+            if (v === null) continue; // sensor glitch: skip it
+            pushPoint(hist[k], { timestampMs: ts, value: v });
+            touched = true;
           }
-          return touched ? out : prev;
-        });
-        setLastUpdated(new Date().toLocaleTimeString());
+          const lat = clean("gps_latitude", record.gps_latitude);
+          const lon = clean("gps_longitude", record.gps_longitude);
+          if (lat !== null && lon !== null && (Math.abs(lat) > 1e-6 || Math.abs(lon) > 1e-6)) {
+            pushPoint(trackRef.current, { t: ts, lat, lon }, "t");
+          }
+        }
+        if (touched) {
+          bump();
+          setLastUpdated(new Date().toLocaleTimeString());
+        }
       };
       socket.onerror = (err) => {
         console.error("WebSocket Error:", err);
@@ -925,6 +1297,83 @@ export default function App() {
       if (socket) socket.close();
     };
   }, [activeDuck]);
+
+  /* --- Runs --- */
+  const activeRun = runs.find((r) => r.endMs == null) || null;
+  const viewedRun = view === "live" ? null : runs.find((r) => r.id === view) || null;
+
+  const startRun = async () => {
+    // On the mock, a new run also means a fresh battery at the start line.
+    if (feeds.length) {
+      try {
+        setFeedStatus(await mockCall("/control/restart", "POST"));
+      } catch {
+        /* real hardware: nothing to reset */
+      }
+    }
+    runCounter.current += 1;
+    const id = `run-${Date.now()}`;
+    setRuns((rs) => [...rs, { id, name: `Run ${runCounter.current}`, startMs: Date.now(), endMs: null }]);
+    setViewState("live");
+    setCursorMs(null);
+  };
+  const stopRun = () => {
+    const end = Date.now();
+    setRuns((rs) => rs.map((r) => (r.endMs == null ? { ...r, endMs: end } : r)));
+  };
+  const setView = (v) => {
+    setViewState(v);
+    setCursorMs(null); // a past run opens at its end; Live follows now
+  };
+  const backToLive = () => {
+    setViewState("live");
+    setCursorMs(null);
+  };
+
+  const changeFeed = async (id) => {
+    if (activeRun) stopRun(); // a different car feed can't be the same run
+    // Start the live view fresh (skip ~2 s so the old feed's last in-flight sample doesn't sneak in).
+    setLiveSince(Date.now() + 2000);
+    setViewState("live");
+    setCursorMs(null);
+    try {
+      setFeedStatus(await mockCall(`/control/feed?id=${encodeURIComponent(id)}`, "POST"));
+    } catch (e) {
+      console.error("Could not switch demo feed:", e);
+    }
+  };
+  const changeSpeed = async (x) => {
+    try {
+      setFeedStatus(await mockCall(`/control/speed?x=${x}`, "POST"));
+    } catch (e) {
+      console.error("Could not change speed:", e);
+    }
+  };
+
+  /* --- What's on screen: everything is "as of" windowEnd --- */
+  const firstTs = useMemo(() => {
+    const firsts = CHANNEL_KEYS.map((k) => historyRef.current[k][0]?.timestampMs).filter(Number.isFinite);
+    return firsts.length ? Math.min(...firsts) : null;
+  }, [version]);
+  const scopeStart = viewedRun ? viewedRun.startMs : Math.max(firstTs ?? now - WINDOW_MS, liveSince);
+  const scopeEnd = viewedRun ? viewedRun.endMs : now;
+  const isLive = !viewedRun && cursorMs === null;
+  const windowEnd = cursorMs ?? scopeEnd;
+
+  const data = useMemo(
+    () => sliceHistory(historyRef.current, Math.max(windowEnd - WINDOW_MS, scopeStart), windowEnd),
+    [version, windowEnd, scopeStart]
+  );
+  const scopeTrack = useMemo(() => {
+    const t = trackRef.current;
+    return t.slice(lowerBound(t, scopeStart, "t"), lowerBound(t, scopeEnd + 1, "t"));
+  }, [version, scopeStart, scopeEnd]);
+
+  const seek = (ms) => {
+    // Dragging all the way right on Live snaps back to following live.
+    if (!viewedRun && ms >= now - 1500) setCursorMs(null);
+    else setCursorMs(ms);
+  };
 
   return (
     <div
@@ -945,7 +1394,12 @@ export default function App() {
         body { background-color: #020817; }
         @keyframes pulseCritical { 0%,100% { box-shadow: 0 0 0 0 rgba(239,68,68,0.0); } 50% { box-shadow: 0 0 14px 2px rgba(239,68,68,0.45); } }
         .pulse-critical { animation: pulseCritical 1.4s ease-in-out infinite; }
-        @media (prefers-reduced-motion: reduce) { .pulse-critical { animation: none; } }
+        .track-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: 14px; }
+        @media (min-width: 900px) { .track-grid { grid-template-columns: minmax(0, 2fr) minmax(260px, 1fr); } }
+        @keyframes pulseDot { 0%,100% { opacity: 0.15; } 50% { opacity: 0.55; } }
+        .pulse-dot { animation: pulseDot 1s ease-in-out infinite; }
+        @media (prefers-reduced-motion: reduce) { .pulse-critical, .pulse-dot { animation: none; } }
+        button:focus-visible, select:focus-visible, input:focus-visible { outline: 2px solid #38bdf8; outline-offset: 2px; }
       `}</style>
 
       <div
@@ -965,32 +1419,31 @@ export default function App() {
             <Legend />
           </div>
         </div>
-        <div style={{ display: "flex", alignItems: "center", gap: "12px", flexWrap: "wrap" }}>
-          <select
-            value={activeDuck}
-            onChange={(e) => setActiveDuck(e.target.value)}
-            style={{ backgroundColor: "#1e293b", color: "#e2e8f0", border: "1px solid #334155", padding: "6px 10px", borderRadius: "6px", fontSize: "12px" }}
-          >
-            {!ducks.length ? (
-              <option value="" disabled>
-                Loading...
-              </option>
-            ) : null}
-            {ducks.map((d) => (
-              <option key={d} value={d}>
-                {d}
-              </option>
-            ))}
-          </select>
-          <span style={{ display: "inline-flex", alignItems: "center", gap: "6px", fontSize: "12px", color: connected ? "#22c55e" : "#ef4444" }}>
-            <span style={{ width: 8, height: 8, borderRadius: "50%", backgroundColor: connected ? "#22c55e" : "#ef4444" }} />
-            {connected ? "LIVE" : "DISCONNECTED"}
-          </span>
-          <span style={{ fontSize: "11px", color: "#64748b" }}>{lastUpdated ? `Updated ${lastUpdated}` : ""}</span>
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: "8px" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: "12px", flexWrap: "wrap" }}>
+            <select value={activeDuck} onChange={(e) => setActiveDuck(e.target.value)} style={controlStyle} aria-label="Car">
+              {!ducks.length ? (
+                <option value="" disabled>
+                  Loading...
+                </option>
+              ) : null}
+              {ducks.map((d) => (
+                <option key={d} value={d}>
+                  {d}
+                </option>
+              ))}
+            </select>
+            <span style={{ display: "inline-flex", alignItems: "center", gap: "6px", fontSize: "12px", color: connected ? "#22c55e" : "#ef4444" }}>
+              <span style={{ width: 8, height: 8, borderRadius: "50%", backgroundColor: connected ? "#22c55e" : "#ef4444" }} />
+              {connected ? "CONNECTED" : "DISCONNECTED"}
+            </span>
+            <span style={{ fontSize: "11px", color: "#64748b" }}>{lastUpdated ? `Updated ${lastUpdated}` : ""}</span>
+          </div>
+          <DemoFeed feeds={feeds} status={feedStatus} onFeed={changeFeed} onSpeed={changeSpeed} />
         </div>
       </div>
 
-      {/* Sticky: tabs + warning bar stay visible while scrolling */}
+      {/* Sticky: tabs, run bar and warning bar stay visible while scrolling */}
       <div
         style={{
           position: "sticky",
@@ -1003,15 +1456,32 @@ export default function App() {
           borderBottom: "1px solid #1e293b",
         }}
       >
-        <Tabs tab={tab} setTab={setTab} data={buffers} />
-        <StatusBar data={buffers} onOpen={openChannel} />
+        <Tabs tab={tab} setTab={setTab} data={data} />
+        <RunBar
+          runs={runs}
+          activeRun={activeRun}
+          view={view}
+          setView={setView}
+          isLive={isLive}
+          scopeStart={scopeStart}
+          scopeEnd={scopeEnd}
+          windowEnd={windowEnd}
+          onSeek={seek}
+          onBackToLive={backToLive}
+          onStart={startRun}
+          onStop={stopRun}
+          now={now}
+        />
+        <StatusBar data={data} onOpen={openChannel} />
       </div>
 
       {tab === "overview" ? (
-        <Overview data={buffers} windowEndMs={windowEndMs} onOpen={openChannel} />
+        <Overview data={data} windowEndMs={windowEnd} onOpen={openChannel} />
+      ) : tab === "track" ? (
+        <TrackView track={scopeTrack} cursorMs={isLive ? null : windowEnd} data={data} windowEndMs={windowEnd} />
       ) : (
         PANELS.filter((p) => p.id === tab).map((p) => (
-          <Panel key={p.id} panel={p} data={buffers} windowEndMs={windowEndMs} />
+          <Panel key={p.id} panel={p} data={data} windowEndMs={windowEnd} />
         ))
       )}
     </div>
