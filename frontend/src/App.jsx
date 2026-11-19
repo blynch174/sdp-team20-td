@@ -1084,10 +1084,19 @@ function DemoFeed({ feeds, status, onFeed, onSpeed }) {
       title="Demo only: chooses what the fake car sends. The real car can't be switched.">
       <span style={{ color: "#64748b", letterSpacing: "0.1em", fontSize: "10px" }}>DEMO FEED</span>
       <select aria-label="Demo feed" value={status?.id ?? "sim"} onChange={(e) => onFeed(e.target.value)} style={controlStyle}>
-        {feeds.map((f) => (
-          <option key={f.id} value={f.id}>
-            {f.kind === "sim" ? f.label : `${f.label} · ${fmtDuration(f.duration_s * 1000)}${f.moving === false ? " (car parked)" : ""}`}
-          </option>
+        {feeds.filter((f) => f.kind === "sim").map((f) => (
+          <option key={f.id} value={f.id}>{f.label}</option>
+        ))}
+        {[...new Set(feeds.filter((f) => f.kind !== "sim").map((f) => f.group))].map((group) => (
+          <optgroup key={group} label={group}>
+            {feeds
+              .filter((f) => f.kind !== "sim" && f.group === group)
+              .map((f) => (
+                <option key={f.id} value={f.id}>
+                  {`${f.label} · ${fmtDuration(f.duration_s * 1000)}${f.moving === false ? " (car parked)" : ""}`}
+                </option>
+              ))}
+          </optgroup>
         ))}
       </select>
       <select aria-label="Playback speed" value={String(status?.speed ?? 1)} onChange={(e) => onSpeed(Number(e.target.value))} style={controlStyle}>

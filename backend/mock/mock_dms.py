@@ -14,14 +14,14 @@ DATA SOURCES (pick one with the DATA_SOURCE env var)
         battery gets low, the sim starts a new "run" with a fresh battery.
 
   csv   Replays a recorded log row by row, in real time, looping at the end.
-        Expects the AiM CSV export format (the files in doc/data-sets/).
-        Set CSV_PATH to the file, e.g. CSV_PATH=/data/801.csv
+        Expects the AiM CSV export format (the logs under data/: raw AiM exports or Hugging Face copies).
+        Set CSV_PATH to the file, e.g. CSV_PATH=/data/hf/ev-fsae-testing/2025-07-12/2025_07_12-02.csv
 
 DEMO CONTROLS (used by the dashboard's "Demo feed" picker)
 -----------------------------------------------------------
-  GET  /control/feeds          simulated car + every recorded log in CSV_DIR
+  GET  /control/feeds          simulated car + every recorded log under CSV_DIR, by date
   GET  /control/status         what is playing and how far along it is
-  POST /control/feed?id=801    switch the fake car to a recorded log ("sim" = simulator)
+  POST /control/feed?id=...    switch the fake car to a recorded log ("sim" = simulator)
   POST /control/restart        fresh run: sim gets a new battery at the start line,
                                a log starts over from the beginning
   POST /control/speed?x=2      playback speed (1-10x)
@@ -44,6 +44,7 @@ import csv
 import math
 import os
 import random
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Optional
@@ -56,8 +57,8 @@ from fastapi.middleware.cors import CORSMiddleware
 load_dotenv()
 VALID_API_KEY = os.getenv("OWL_API_KEY")
 DATA_SOURCE = os.getenv("DATA_SOURCE", "sim").lower()
-CSV_PATH = os.getenv("CSV_PATH", "/data/801.csv")
-CSV_DIR = os.getenv("CSV_DIR", os.path.dirname(CSV_PATH) or "/data")
+CSV_PATH = os.getenv("CSV_PATH", "/data/hf/ev-fsae-testing/2025-07-12/2025_07_12-02.csv")
+CSV_DIR = os.getenv("CSV_DIR", "/data")  # scanned recursively for recorded logs
 # Playback speed for both the simulator and log replay (>1 = faster than real time).
 # Starts from SIM_SPEED and can be changed live with POST /control/speed.
 PLAYBACK = {"speed": float(os.getenv("SIM_SPEED", "1.0"))}
@@ -302,12 +303,73 @@ class SimulatedCar:
 GPS_MAX_ACCURACY = 30.0  # drop positions with a worse "GPS PosAccuracy" than this
 
 
+def _is_number(text: str) -> bool:
+    try:
+        float(text)
+        return True
+    except (TypeError, ValueError):
+        return False
+
+
+_MONTHS = "Jan Feb Mar Apr May Jun Jul Aug Sep Oct Nov Dec".split()
+
+
+def _feed_label(feed_id: str) -> tuple[str, str]:
+    """('2025-07-12', 'Jul 12 · session 02') from an id like hf/ev-fsae-testing/2025-07-12/2025_07_12-02."""
+    parts = feed_id.split("/")
+    name = parts[-1]
+    date = next((p for p in reversed(parts[:-1]) if len(p) == 10 and p[4] == "-" and p[7] == "-"), "")
+    day = f"{_MONTHS[int(date[5:7]) - 1]} {int(date[8:10])}" if date else "Other"
+    if "-" in name and "_" in name:  # Hugging Face name: 2025_07_12-02
+        return date or "other", f"{day} · session {name.rsplit('-', 1)[1]}"
+    return date or "other", f"{day} · raw log {name}"
+
+
+def _quick_scan(path: str) -> Optional[dict[str, Any]]:
+    """Length and whether the car moved, without loading the whole file into memory."""
+    rate, header, rpm_i, n, moved, t0, t1 = None, None, None, 0, False, None, None
+    with open(path, encoding="latin-1") as f:
+        for line in f:
+            cells = [c.strip().strip('"') for c in line.split(",")]
+            if header is None:
+                if cells[0] == "Sample Rate" and len(cells) > 1 and _is_number(cells[1]):
+                    rate = float(cells[1])
+                if cells[0] == "Time" and len(cells) > 5:
+                    header = cells
+                    rpm_i = header.index("RPM") if "RPM" in header else None
+                continue
+            if not cells[0] or not _is_number(cells[0]):
+                continue  # units row or blank line
+            n += 1
+            if t0 is None:
+                t0 = float(cells[0])
+            elif t1 is None:
+                t1 = float(cells[0])
+            if not moved and rpm_i is not None and n % 20 == 0:
+                try:
+                    moved = float(cells[rpm_i]) > 0.5
+                except (ValueError, IndexError):
+                    pass
+    if header is None or n == 0:
+        return None
+    if rate is None:
+        rate = 1 / (t1 - t0) if t0 is not None and t1 is not None and t1 > t0 else 20.0
+    return {"duration_s": round(n / rate, 1), "moving": moved}
+
+
 class CsvReplay:
-    """Replays an AiM CSV export in real time, looping at the end."""
+    """Replays a recorded log in real time, looping at the end.
+
+    Reads both formats in data/:
+      raw AiM export: 14 metadata lines, header, units row, blank line, data
+      Hugging Face:   header on line 1, data from line 2 (no units row)
+    """
 
     def __init__(self, path: str) -> None:
         self.path = path
-        self.id = os.path.splitext(os.path.basename(path))[0]
+        rel = os.path.relpath(path, CSV_DIR) if path.startswith(CSV_DIR) else os.path.basename(path)
+        self.id = os.path.splitext(rel)[0].replace(os.sep, "/")
+        self.label = _feed_label(self.id)[1]
         self.rows, self.rate = self._load(path)
         self.duration = len(self.rows) / self.rate
         self.restart()
@@ -319,35 +381,40 @@ class CsvReplay:
 
     def status(self) -> dict[str, Any]:
         return {
-            "kind": "log", "id": self.id, "label": f"Recorded log {self.id}",
+            "kind": "log", "id": self.id, "label": self.label,
             "run": None, "lap": None,
             "position_s": round(self.pos, 1), "duration_s": round(self.duration, 1),
         }
 
     @staticmethod
     def _load(path: str) -> tuple[list[dict[str, float]], float]:
-        rate = 20.0
+        rate = None
         with open(path, newline="", encoding="latin-1") as f:
             reader = csv.reader(f)
             header = None
             for line in reader:
                 if line and line[0] == "Sample Rate":
                     rate = float(line[1])
-                # The metadata block also has a "Time" row (time of day), so
+                # The AiM metadata block also has a "Time" row (time of day), so
                 # the real header is the "Time" row with many columns.
                 if line and line[0] == "Time" and len(line) > 5:
                     header = line
                     break
             if header is None:
-                raise ValueError(f"{path}: no 'Time' header row found; is this an AiM CSV?")
-            next(reader, None)  # units row
+                raise ValueError(f"{path}: no 'Time' header row found; is this a logger CSV?")
             wanted = [(i, name) for i, name in enumerate(header) if name in CHANNELS]
+            # Raw AiM files have a units row next; Hugging Face files go straight to data.
+            first = next(reader, None)
+            pending = [first] if first and _is_number(first[0]) else []
             # GPS fix quality: the logger reports ~200 before the GPS locks on, ~4-20 after.
             acc_i = header.index("GPS PosAccuracy") if "GPS PosAccuracy" in header else None
             rows = []
-            for line in reader:
+            times = []
+            for line in (*pending, *reader) if pending else reader:
                 if not line:
                     continue
+                if len(times) < 2 and _is_number(line[0]):
+                    times.append(float(line[0]))
                 row = {}
                 for i, name in wanted:
                     try:
@@ -365,6 +432,8 @@ class CsvReplay:
                 rows.append(row)
         if not rows:
             raise ValueError(f"{path}: no data rows")
+        if rate is None:  # no metadata: work it out from the Time column
+            rate = 1 / (times[1] - times[0]) if len(times) == 2 and times[1] > times[0] else 20.0
         return rows, rate
 
     def next_sample(self) -> dict[str, float]:
@@ -389,30 +458,44 @@ _feed_cache: Optional[list[dict[str, Any]]] = None
 
 
 def list_feeds() -> list[dict[str, Any]]:
-    """The simulator plus every recorded log in CSV_DIR (scanned once, then cached)."""
+    """The simulator plus every recorded log under CSV_DIR, grouped by date (scanned once).
+
+    If a date has Hugging Face copies, its raw AiM copies are skipped (same values).
+    """
     global _feed_cache
     if _feed_cache is None:
-        feeds = [{"id": "sim", "label": "Simulated car (live)", "kind": "sim"}]
-        try:
-            names = sorted(n for n in os.listdir(CSV_DIR) if n.lower().endswith(".csv"))
-        except OSError:
-            names = []
-        for name in names:
-            path = os.path.join(CSV_DIR, name)
+        found = []
+        for folder, _dirs, files in os.walk(CSV_DIR):
+            for name in files:
+                if name.lower().endswith(".csv"):
+                    rel = os.path.relpath(os.path.join(folder, name), CSV_DIR)
+                    found.append(os.path.splitext(rel)[0].replace(os.sep, "/"))
+        hf_dates = {_feed_label(fid)[0] for fid in found if "_" in fid.split("/")[-1]}
+        feeds = [{"id": "sim", "label": "Simulated car (live)", "kind": "sim", "group": ""}]
+        for fid in sorted(found):
+            date, label = _feed_label(fid)
+            if "_" not in fid.split("/")[-1] and date in hf_dates:
+                continue  # raw duplicate of a Hugging Face file
             try:
-                rows, rate = CsvReplay._load(path)
-            except (OSError, ValueError):
+                info = _quick_scan(os.path.join(CSV_DIR, fid + ".csv"))
+            except OSError:
+                info = None
+            if info is None:
                 continue
-            top_speed = max((r.get("GPS Speed", 0.0) for r in rows), default=0.0)
-            feeds.append({
-                "id": os.path.splitext(name)[0],
-                "label": f"Recorded log {os.path.splitext(name)[0]}",
-                "kind": "log",
-                "duration_s": round(len(rows) / rate, 1),
-                "moving": top_speed > 5,  # False = car never moved (e.g. a stationary test)
-            })
+            feeds.append({"id": fid, "label": label, "kind": "log", "group": date, **info})
         _feed_cache = feeds
     return _feed_cache
+
+
+# Scan the logs in the background at startup so the dashboard's dropdown opens instantly.
+threading.Thread(target=list_feeds, daemon=True).start()
+
+
+def _log_path(feed_id: str) -> Optional[str]:
+    """The file for a feed id, refusing anything outside CSV_DIR."""
+    root = os.path.realpath(CSV_DIR)
+    path = os.path.realpath(os.path.join(root, feed_id + ".csv"))
+    return path if path.startswith(root + os.sep) and os.path.isfile(path) else None
 
 
 # ===========================================================================
@@ -494,7 +577,7 @@ async def control_status() -> dict[str, Any]:
 
 
 @app.post("/control/feed")
-async def control_feed(id: str = Query(..., description='"sim" or a log name like 801')) -> dict[str, Any]:
+async def control_feed(id: str = Query(..., description='"sim" or a log id from /control/feeds')) -> dict[str, Any]:
     global source, _sim_car
     if id == "sim":
         if _sim_car is None:
@@ -503,8 +586,8 @@ async def control_feed(id: str = Query(..., description='"sim" or a log name lik
         _sim_car.new_run(from_start_line=True)
         source = _sim_car
         return _status()
-    path = os.path.join(CSV_DIR, f"{id}.csv")
-    if not os.path.isfile(path):
+    path = _log_path(id)
+    if path is None:
         raise HTTPException(status_code=404, detail=f"No recorded log named {id} in {CSV_DIR}")
     source = CsvReplay(path)
     return _status()

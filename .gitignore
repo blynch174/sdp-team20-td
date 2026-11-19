@@ -3,3 +3,10 @@
 __pycache__/
 node_modules/
 .DS_Store
+.vscode/
+.ipynb_checkpoints/
+
+# Hugging Face download leftovers (the CSVs themselves are committed as normal files;
+# the dataset's own .gitattributes would push them into Git LFS)
+data/hf/**/.cache/
+data/hf/**/.gitattributes

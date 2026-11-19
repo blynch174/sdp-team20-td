@@ -21,7 +21,7 @@ services:
       - OWL_API_KEY=${OWL_API_KEY}
       # Data source for the fake car: "sim" (simulated run) or "csv" (replay a log)
       - DATA_SOURCE=${DATA_SOURCE:-sim}
-      - CSV_PATH=${CSV_PATH:-/data/801.csv}
+      - CSV_PATH=${CSV_PATH:-/data/hf/ev-fsae-testing/2025-07-12/2025_07_12-02.csv}
       - SIM_SPEED=${SIM_SPEED:-1.0}
     ports:
       - "5000:5000"
@@ -37,7 +37,7 @@ services:
       ]
     volumes:
       - ./backend/mock:/app
-      - ./doc/data-sets:/data:ro
+      - ./data:/data:ro
 
   backend:
     build:
